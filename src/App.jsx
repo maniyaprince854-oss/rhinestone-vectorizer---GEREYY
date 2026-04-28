@@ -117,8 +117,8 @@ export default function App() {
       }
 
       setStatus("Stage 4/5: Finding peaks...");
-      // For color distance, range is 0-441. Higher sens = lower threshold.
-      const peakThresh = Math.max(15, 60 - sens * 4);
+      // For color distance, range is 0-441. Lower threshold for low-contrast/blurry images
+      const peakThresh = Math.max(8, 40 - sens * 3.5);
       const sr=3,sr2=sr*sr; let maxima=[];
       for(let y=0;y<H;y++)for(let x=0;x<W;x++){
         const v=bm[y*W+x]; if(v<peakThresh) continue;
@@ -129,9 +129,10 @@ export default function App() {
           if(nx>=0&&nx<W&&ny>=0&&ny<H&&bm[ny*W+nx]>v){ok=false;break o;}}
         if(ok) maxima.push([x,y,v]);
       }
+      // Sort peaks strongest to weakest
       maxima.sort((a,b)=>b[2]-a[2]);
 
-      // NMS with 4px (allows denser packing)
+      // NMS with 4px
       let kept=[];
       for(const[mx,my,mv]of maxima){
         let ok=true;
@@ -142,17 +143,24 @@ export default function App() {
 
       if(kept.length<3){setStatus("No beads found. Try higher sensitivity.");setPhase("upload");return;}
 
-      // Mode NN
-      let cents=kept.map(k=>[k[0],k[1]]);
+      // MODE NN: Calculate grid scale using ONLY the strongest peaks (top 30%)
+      // This prevents thousands of faint noise blips in low-quality images from corrupting the grid scale.
+      const reliableCount = Math.max(Math.min(kept.length, 20), Math.floor(kept.length * 0.3));
+      const reliableKept = kept.slice(0, reliableCount);
+      
+      let cents=reliableKept.map(k=>[k[0],k[1]]);
       const computeNN=(list)=>list.map((c,i)=>{let m=1e9;for(let j=0;j<list.length;j++){
         if(i===j)continue;const d=Math.hypot(c[0]-list[j][0],c[1]-list[j][1]);if(d<m)m=d;}return m;});
       let nn=computeNN(cents);
       let freq={};nn.forEach(d=>{const k=Math.round(d);freq[k]=(freq[k]||0)+1;});
       let mNN=0,mC=0;for(const[k,v]of Object.entries(freq))if(v>mC){mC=v;mNN=+k;}
 
-      // Dedup with a much smaller threshold (0.35 * mode_nn) so it perfectly separates rings of beads
-      const minD=Math.max(2, mNN*0.35),minD2=minD*minD;
-      const scored=kept.slice().sort((a,b)=>b[2]-a[2]);const dd=[];
+      // DEDUP: Merge multiple peaks inside a single blurry bead
+      // Using 0.55 * mode_nn ensures that true adjacent beads (distance ~1.0) aren't merged,
+      // but false double-peaks inside one blurry bead (distance <0.6) are merged perfectly.
+      const minD=Math.max(3, mNN*0.55),minD2=minD*minD;
+      const scored=kept.slice(); // already sorted
+      const dd=[];
       for(const[cx,cy,sc]of scored){let ok=true;
         for(const[ex,ey]of dd)if((cx-ex)**2+(cy-ey)**2<minD2){ok=false;break;}
         if(ok) dd.push([cx,cy,sc]);}
@@ -163,10 +171,9 @@ export default function App() {
       const ref=[];
       for(const[ix,iy,iscore] of dd){
         let cx=ix,cy=iy;
-        // PERFECT CENTERING: only average pixels that are >50% of the peak value
-        // This stops neighbors from pulling the center of mass off-target
         const peakV = bm[Math.round(iy)*W+Math.round(ix)] || iscore;
-        const thresh = Math.max(10, peakV * 0.5);
+        // Adaptive threshold for faint images: 50% of the local peak value
+        const thresh = peakV * 0.5;
         for(let it=0;it<3;it++){let sx=0,sy=0,sw=0;
           for(let dy=-wr;dy<=wr;dy++)for(let dx=-wr;dx<=wr;dx++){
             if(dx*dx+dy*dy>wr2)continue;const nx=Math.round(cx+dx),ny=Math.round(cy+dy);
